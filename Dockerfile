@@ -33,8 +33,9 @@ RUN apt-get update \
  # CI mounts the checkout owned by another user; git would refuse it as "dubious ownership".
  && git config --system --add safe.directory '*'
 COPY --from=build /pr-guard /usr/local/bin/pr-guard
-COPY --from=model /model /opt/pr-guard/model
-ENV PR_GUARD_MODEL=/opt/pr-guard/model
+# The default model (pr-guard:1) as a cache hit; another `model` in the policy downloads next to it.
+COPY --from=model /model /opt/pr-guard/cache/pr-guard-1
+ENV PR_GUARD_CACHE=/opt/pr-guard/cache
 LABEL org.opencontainers.image.source="https://github.com/typestrict-lab/pr-guard" \
       org.opencontainers.image.description="pr-guard with the TS-PRGuard weights" \
       org.opencontainers.image.licenses="Apache-2.0"

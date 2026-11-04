@@ -49,9 +49,10 @@ enum Cmd {
         /// Only the deterministic rules: no model, instant (the pre-commit default).
         #[arg(long, conflicts_with = "answers")]
         no_model: bool,
-        /// Directory with the model weights; default `$PR_GUARD_MODEL`, else the cache (`$PR_GUARD_CACHE`, `~/.cache/pr-guard`).
+        /// The model: pr-guard:<version>, pr-guard:latest, hf:<owner>/<repo>[@<revision>], an https:// URL or a
+        /// directory; default `$PR_GUARD_MODEL`, else the policy's `model` (pr-guard:1).
         #[arg(long)]
-        model: Option<PathBuf>,
+        model: Option<String>,
         /// ONNX Runtime threads; default all cores.
         #[arg(long)]
         threads: Option<usize>,
@@ -101,9 +102,11 @@ enum ModelCmd {
     /// Download the package from Hugging Face ahead of time (Docker images, runners without internet at check time);
     /// `check` downloads it on first use otherwise.
     Pull {
-        /// Directory to write it to; default the cache (`$PR_GUARD_MODEL`, `$PR_GUARD_CACHE`, `~/.cache/pr-guard`).
-        #[arg(long)]
-        dir: Option<PathBuf>,
+        /// The model (as in the policy); default `$PR_GUARD_MODEL`, else the policy's. Prints the directory it is in.
+        model: Option<String>,
+        /// Missing file = the default policy.
+        #[arg(long, default_value = ".github/pr-guard.yml")]
+        policy: PathBuf,
     },
 }
 
@@ -117,11 +120,10 @@ fn main() {
 
 fn run() -> anyhow::Result<()> {
     match Cli::parse().cmd {
-        Cmd::Init => print!("{}", serde_yaml::to_string(&Policy::default())?),
-        Cmd::Model { cmd: ModelCmd::Pull { dir } } => {
-            let dir = dir.or_else(model::default_dir).context("no model directory: pass --dir, set PR_GUARD_MODEL or HOME")?;
-            pull::pull(&dir, false)?;
-            println!("{}", dir.display());
+        Cmd::Init => print!("{}", pr_guard::policy::DEFAULT_FILE),
+        Cmd::Model { cmd: ModelCmd::Pull { model, policy } } => {
+            let chosen = model.or_else(|| std::env::var("PR_GUARD_MODEL").ok()).map_or_else(|| Policy::load(&policy).map(|p| p.model), Ok)?;
+            println!("{}", pull::resolve(&pull::parse(&chosen)?, false)?.display());
         }
         Cmd::Check {
             diff: diff_path, staged, base, head, answers, description, description_file, no_model, model: model_dir, threads, policy,
@@ -186,7 +188,8 @@ fn run() -> anyhow::Result<()> {
                 // What the changed files settle first, free and the same without the model; the model only gets the rest.
                 answer_by_rule(&mut answers, &facts::files(&raw));
                 if !no_model {
-                    ask_model(&mut answers, model_dir, threads, description.as_deref(), &raw)?;
+                    let chosen = model_dir.or_else(|| std::env::var("PR_GUARD_MODEL").ok()).unwrap_or_else(|| policy.model.clone());
+                    ask_model(&mut answers, &chosen, threads, description.as_deref(), &raw)?;
                 }
             }
             let found = rules::check(&policy.rules, &files)?;
@@ -307,20 +310,10 @@ fn apply(answers: &mut verdict::Answers, q: &model::Question, p: &[f64]) {
     }
 }
 
-fn ask_model(answers: &mut verdict::Answers, dir: Option<PathBuf>, threads: Option<usize>, description: Option<&str>, raw_diff: &str) -> anyhow::Result<()> {
+fn ask_model(answers: &mut verdict::Answers, chosen: &str, threads: Option<usize>, description: Option<&str>, raw_diff: &str) -> anyhow::Result<()> {
     let description = description.map(model::py_strip).filter(|d| !d.is_empty());
-    // A directory the user named is used as it is; the default one is the cache, filled (or brought up to this release's
-    // model) from Hugging Face on first use.
-    let named = dir.is_some() || std::env::var_os("PR_GUARD_MODEL").is_some();
-    let dir = dir.or_else(model::default_dir).context("no model directory: pass --model, set PR_GUARD_MODEL or HOME")?;
-    if !named {
-        pull::pull(&dir, false).context("getting the model (run with --no-model for the deterministic checks only)")?;
-    }
-    anyhow::ensure!(
-        dir.join("decision_ai.json").exists() || dir.join("pr_guard_model.json").exists(),
-        "no model weights in {} (pass --model <dir>, set PR_GUARD_MODEL, or run with --no-model)",
-        dir.display()
-    );
+    // Downloaded into the cache on first use (a directory is used as it is).
+    let dir = pull::resolve(&pull::parse(chosen)?, false).context("getting the model (run with --no-model for the deterministic checks only)")?;
     let threads = threads.unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()));
     let t0 = std::time::Instant::now();
     let mut m = model::Model::load(&dir, threads)?;

@@ -13,7 +13,7 @@
 //! 4. `Model::noul`: the 8-bit ONNX from `prguard_onnx.py` (MatMul weights in blocks of 32, embeddings int8), inputs padded to a multiple of 64 (the local attention
 //!    works in blocks of 64), and the run's temperature on the two option logits.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::LazyLock;
 
 use anyhow::{Context, Result, anyhow};
@@ -34,21 +34,6 @@ pub const DESCRIPTION_CHARS: usize = 600;
 pub const DIFF_CHARS: usize = 5000;
 /// `--corte-quebra` in `prguard_f3.py` (v4, lab HIPOTESES PRG9): the breaking-change question reads the whole PR.
 pub const BREAKING_DIFF_CHARS: usize = 14_000;
-
-/// Where the weights live when `--model` is not given: `$PR_GUARD_MODEL`, else `<cache>/<MODEL_NAME>` with the cache
-/// from `$PR_GUARD_CACHE` (each CI wrapper keeps it in the CI cache), `$XDG_CACHE_HOME/pr-guard` or `~/.cache/pr-guard`.
-pub const MODEL_NAME: &str = "ts-prguard";
-
-pub fn default_dir() -> Option<PathBuf> {
-    if let Some(d) = std::env::var_os("PR_GUARD_MODEL") {
-        return Some(d.into());
-    }
-    let cache = std::env::var_os("PR_GUARD_CACHE")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("XDG_CACHE_HOME").map(|d| PathBuf::from(d).join("pr-guard")))
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache/pr-guard")))?;
-    Some(cache.join(MODEL_NAME))
-}
 
 /// The yes/no and choice questions of the multi-task model, exactly as `scripts/prguard_f3.py` wrote them for the
 /// typestrict training (the plan kept them byte for byte). `message` is the state key the PR text goes in, if any.

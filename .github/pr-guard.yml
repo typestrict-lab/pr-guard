@@ -1,64 +1,37 @@
-# pr-guard's policy for this repository: the defaults (`pr-guard init` prints them), written out as an example to copy.
-# A missing file means exactly this policy. Every key may be left out; what is left out keeps its default.
+# pr-guard policy: .github/pr-guard.yml. `pr-guard init` prints this file; every key may be left out, and what is left
+# out keeps the value written here.
 
-# shadow: report, comment, label and set the status, never fail. enforce: the `pr-guard` status fails when the policy
-# blocks and waits for the approvals the verdict asks for. Start in shadow until the answers look right on your PRs.
+# shadow: report on every pull request, never fail. enforce: the pr-guard status fails when the policy blocks and
+# waits for the approvals the verdict asks for. Stay in shadow until the answers look right on your pull requests.
 mode: shadow
 
-# This label on a pull request skips the check (and the model) entirely.
-skip_label: pr-guard:skip
+# The model: pr-guard:<version> (a release this pr-guard was tested with), pr-guard:latest (the newest published),
+# hf:<owner>/<repo>[@<revision>] (your own on Hugging Face; $HF_TOKEN for a private one), an https:// URL serving the
+# files (a CDN or mirror), or a directory.
+model: pr-guard:1
 
-# What TS-PRGuard answers, as a score where 1 is the safe side (for vulnerability and breaking, 1 - the probability of
-# yes). `weight` counts in the combined score; below `warn_below` the answer is a warning (at least one reviewer);
-# below `min` a danger (two reviewers, and blocks when `block_on: danger` in enforce mode).
-questions:
-  description_matches:
-    weight: 2.0
-    warn_below: 0.6
-    min: 0.3
-  # Bands 0 (trivial) to 4 (very large) as 1 - band / 4: warns only on very large changes.
-  complexity:
-    weight: 1.0
-    warn_below: 0.25
-    min: null
-  # A warning from P >= 0.7, never a block: set `min: 0.3` to block at P >= 0.7 once you trust it on your code.
-  vulnerability:
-    weight: 3.0
-    warn_below: 0.3
-    min: null
-  tests_cover:
-    weight: 2.0
-    warn_below: 0.5
-    min: null
-  breaking:
-    weight: 2.0
-    warn_below: 0.5
-    min: null
-  # Not answered by TS-PRGuard v1; kept for packages that do.
-  resolves_issue:
-    weight: 1.0
-    warn_below: 0.5
-    min: null
-  focused:
-    weight: 1.0
-    warn_below: 0.5
-    min: null
-
-# The combined score (weighted mean of the answers) sets the reviewers: at or above none_at none, at or above one_at
-# one, below it two. Any warning asks for at least one.
+# Reviewers from the combined score (0 to 100%, the weighted mean of the answers, 100% the safe side).
 reviewers:
-  none_at: 0.85
-  one_at: 0.6
+  none: 85%   # at or above: no review needed
+  one: 60%    # at or above: one reviewer; below: two
 
-# Label pull requests that need no reviewer `pr-guard:auto-merge` (your automation merges them).
-auto_merge: false
+# What the model is asked. warn (at least one reviewer) and block (two reviewers; fails the status in enforce mode)
+# when the risky answer is more likely than this: the percentage the comment shows; `off` never acts.
+questions:
+  description:   { weight: 2, warn: 40%, block: 70% }   # does something other than the description says
+  vulnerability: { weight: 3, warn: 70% }               # introduces a vulnerability
+  breaking:      { weight: 2, warn: 50% }               # breaks existing users
+  tests:         { weight: 2, warn: 50% }               # the tests do not cover it
+  size:          { weight: 1, warn: very large }        # trivial, small, medium, large, very large
 
-# Findings at this level or above block in enforce mode (null never blocks).
-block_on: danger
-
-# Deterministic checks, before and without the model.
+# Deterministic checks, before the model and without it: block, warn, note or off.
 rules:
+  secrets: block
+  destructive_sql: block
+  big_change: { lines: 800, level: warn }
+  dependencies: note
   sensitive_paths:
+    level: warn
     paths:
       - .github/workflows/**
       - "**/auth/**"
@@ -67,23 +40,9 @@ rules:
       - "**/Dockerfile"
       - "**/*.tf"
       - "**/.env*"
-    level: warning
-  secrets:
-    level: danger
-  dependencies:
-    level: info
-  size:
-    max_lines: 800
-    level: warning
-  destructive_sql:
-    level: danger
 
-# Languages TS-PRGuard was evaluated on; changed code in any other is "not evaluated" and never auto-merges.
-languages: [javascript, typescript, go, rust, python, dart, kotlin, java, swift, php, ruby]
+# This label on a pull request skips the check.
+skip_label: pr-guard:skip
 
-# What pr-guard writes on the pull request when it has a token.
-publish:
-  comment: true
-  labels: true
-  status: true
-  reviewers: true
+# Label pull requests that need no reviewer pr-guard:auto-merge, for your automation to merge.
+auto_merge: false

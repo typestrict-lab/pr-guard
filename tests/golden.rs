@@ -54,7 +54,8 @@ fn read<T: for<'de> Deserialize<'de>>(name: &str) -> T {
 }
 
 fn model_dir() -> Option<PathBuf> {
-    let d = model::default_dir()?;
+    // The lab-format package the vectors were made with, in a directory named by $PR_GUARD_MODEL.
+    let d = PathBuf::from(std::env::var_os("PR_GUARD_MODEL")?);
     if d.join("pr_guard_model.json").exists() {
         Some(d)
     } else {
