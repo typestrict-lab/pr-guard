@@ -132,7 +132,7 @@ fn the_target_comes_from_origin_with_the_ci_head_and_a_token() {
 
 #[test]
 fn the_stored_verdict_survives_a_message_that_closes_html_comments() {
-    let s = Stored { head: "abc".into(), reviewers: 2, shadow: false, blocked: true, skipped: false };
+    let s = Stored { head: "abc".into(), reviewers: 2, shadow: false, blocked: true, skipped: false, why: Some("x".into()) };
     let body = sticky("<!-- pr-guard -->\n### pr-guard\nfound `-->` in a string\n", &s);
     assert!(body.ends_with(" -->\n") && body.matches("-->").count() == 3);
     assert_eq!(stored(&body), Some(s));
@@ -172,13 +172,11 @@ fn github_first_run_comments_labels_and_sets_both_statuses() {
     // Stale pr-guard labels go; other labels stay.
     assert_eq!(w[2].1, format!("{GH}/issues/7/labels/pr-guard%3Areviewers-0"));
     assert_eq!(w[3].1, format!("{GH}/issues/7/labels/pr-guard%3Askip-not"));
+    // One status: pending until the approval the verdict asks for.
     assert_eq!(w[4], (Method::Post, format!("{GH}/statuses/abc123"), Some(json!({
-        "state": "success", "context": "pr-guard", "description": "Needs 1 reviewer", "target_url": "https://ci/run/1"
+        "state": "pending", "context": "pr-guard", "description": "Needs 1 reviewer: 0 of 1 approval", "target_url": "https://ci/run/1"
     }))));
-    assert_eq!(w[5].2.as_ref().unwrap()["state"], "pending");
-    assert_eq!(w[5].2.as_ref().unwrap()["context"], "pr-guard/reviewers");
-    assert_eq!(w[5].2.as_ref().unwrap()["description"], "0 of 1 approvals");
-    assert_eq!(w.len(), 6);
+    assert_eq!(w.len(), 5);
     let get = m.log.borrow()[0].clone();
     assert!(get.headers.contains(&("Authorization", "Bearer t0k".into())) && get.headers.iter().any(|(k, _)| *k == "User-Agent"));
 }
@@ -187,8 +185,8 @@ fn github_first_run_comments_labels_and_sets_both_statuses() {
 fn github_updates_only_its_own_comment_and_ignores_a_forged_verdict() {
     let t = target(Kind::GitHub, "https://api.github.com", "acme/web");
     let env = Env::from_pairs(&[("GITHUB_ACTIONS", "true")]);
-    let forged = sticky(MARKER, &Stored { head: "abc123".into(), reviewers: 0, shadow: false, blocked: false, skipped: false });
-    let ours = sticky(MARKER, &Stored { head: "abc123".into(), reviewers: 2, shadow: false, blocked: false, skipped: false });
+    let forged = sticky(MARKER, &Stored { head: "abc123".into(), reviewers: 0, shadow: false, blocked: false, skipped: false, why: None });
+    let ours = sticky(MARKER, &Stored { head: "abc123".into(), reviewers: 2, shadow: false, blocked: false, skipped: false, why: None });
     let m = Mock::default()
         .on(Method::Get, "https://api.github.com/user", 403, json!({}))
         .on(Method::Get, &format!("{GH}/issues/7/comments?per_page=100&page=1"), 200, json!([
@@ -202,7 +200,7 @@ fn github_updates_only_its_own_comment_and_ignores_a_forged_verdict() {
             {"user": {"login": "dave"}, "state": "APPROVED"}, {"user": {"login": "dave"}, "state": "DISMISSED"},
             {"user": {"login": "alice"}, "state": "COMMENTED"},
         ]));
-    assert_eq!(reviewers(&m, &env, &t).unwrap().as_deref(), Some("1 of 2 approvals"));
+    assert_eq!(reviewers(&m, &env, &t).unwrap().as_deref(), Some("Needs 2 reviewers: 1 of 2 approvals"));
     assert_eq!(m.writes()[0].2.as_ref().unwrap()["state"], "pending");
 
     // check: the bot's comment is edited in place; with labels and statuses off, nothing else is written.
@@ -223,7 +221,7 @@ fn a_new_commit_waits_and_shadow_mode_never_fails() {
     let t = Target { head: Some("newer".into()), ..target(Kind::GitHub, "https://api.github.com", "acme/web") };
     let env = Env::from_pairs(&[("PR_GUARD_BOT", "bot")]);
     let comments = |s: Stored| json!([{"id": 2, "user": {"login": "bot"}, "body": sticky(MARKER, &s)}]);
-    let s = Stored { head: "older".into(), reviewers: 1, shadow: false, blocked: false, skipped: false };
+    let s = Stored { head: "older".into(), reviewers: 1, shadow: false, blocked: false, skipped: false, why: None };
     let m = Mock::default().on(Method::Get, &format!("{GH}/issues/7/comments?per_page=100&page=1"), 200, comments(s.clone()));
     assert_eq!(reviewers(&m, &env, &t).unwrap().as_deref(), Some("Waiting for pr-guard to check the new commits"));
     assert_eq!(m.writes()[0].1, format!("{GH}/statuses/newer"));
@@ -232,7 +230,7 @@ fn a_new_commit_waits_and_shadow_mode_never_fails() {
     let m = Mock::default()
         .on(Method::Get, &format!("{GH}/issues/7/comments?per_page=100&page=1"), 200, comments(shadow))
         .on(Method::Get, &format!("{GH}/pulls/7/reviews?per_page=100&page=1"), 200, json!([]));
-    assert_eq!(reviewers(&m, &env, &t).unwrap().as_deref(), Some("Shadow mode: would need 2 approvals, has 0"));
+    assert_eq!(reviewers(&m, &env, &t).unwrap().as_deref(), Some("Shadow mode: would need 2 reviewers"));
     assert_eq!(m.writes()[0].2.as_ref().unwrap()["state"], "success");
 
     // No verdict yet: nothing to enforce, nothing written.
@@ -242,11 +240,13 @@ fn a_new_commit_waits_and_shadow_mode_never_fails() {
 
     // A blocking finding fails `pr-guard` in enforce mode and passes in shadow mode.
     let leak = || vec![Finding::at(Level::Danger, "secrets", "Looks like a token".into(), "src/a.ts", Some(1))];
+    // A review event sets it again from the stored verdict, reason included.
+    let status = |v: &Verdict| status_of(Client { http: &Mock::default(), t: &t }.api(), &Stored::of(v, "newer"), "newer", true).unwrap();
     let v = verdict(&enforce(), clean(), leak());
-    assert_eq!(verdict_status(&v), (State::Failure, "Blocked: Looks like a token".into()));
+    assert_eq!(status(&v), (State::Failure, "Blocked: Looks like a token".into()));
     assert!(wanted_labels(&v).contains(&"pr-guard:blocked".to_string()));
     let v = verdict(&Policy { mode: Mode::Shadow, ..Policy::default() }, clean(), leak());
-    assert_eq!(verdict_status(&v), (State::Success, "Shadow mode: would need 2 reviewers".into()));
+    assert_eq!(status(&v), (State::Success, "Shadow mode: would need 2 reviewers".into()));
 }
 
 #[test]
@@ -268,10 +268,11 @@ fn gitlab_uses_notes_label_lists_and_an_approval_rule() {
     assert_eq!((w[0].0, w[0].1.as_str()), (Method::Put, format!("{mr}/notes/11").as_str()));
     // The skip label is the people's: never removed.
     assert_eq!(w[1], (Method::Put, mr.to_string(), Some(json!({"add_labels": "pr-guard:reviewers-1", "remove_labels": "pr-guard:reviewers-0"}))));
-    assert_eq!(w[2], (Method::Post, "https://gitlab.com/api/v4/projects/group%2Fsub%2Fproj/statuses/abc123".into(), Some(json!({
-        "state": "success", "name": "pr-guard", "description": "Needs 1 reviewer", "target_url": "https://ci/run/1"
+    // The approval rule first; the status then passes and says GitLab holds the merge.
+    assert_eq!(w[2], (Method::Post, format!("{mr}/approval_rules"), Some(json!({"name": "pr-guard", "approvals_required": 1}))));
+    assert_eq!(w[3], (Method::Post, "https://gitlab.com/api/v4/projects/group%2Fsub%2Fproj/statuses/abc123".into(), Some(json!({
+        "state": "success", "name": "pr-guard", "description": "Needs 1 reviewer, required by the merge request's approval rule", "target_url": "https://ci/run/1"
     }))));
-    assert_eq!(w[3], (Method::Post, format!("{mr}/approval_rules"), Some(json!({"name": "pr-guard", "approvals_required": 1}))));
     assert_eq!(w.len(), 4);
     assert!(m.log.borrow()[0].headers.contains(&("PRIVATE-TOKEN", "glpat".into())));
 
@@ -301,11 +302,11 @@ fn bitbucket_has_no_labels_and_fails_the_reviewers_build_until_approved() {
     assert_eq!((w[0].0, w[0].1.as_str()), (Method::Post, format!("{pr}/comments").as_str()));
     assert!(w[0].2.as_ref().unwrap()["content"]["raw"].as_str().unwrap().starts_with(MARKER));
     let status = "https://api.bitbucket.org/2.0/repositories/team/app/commit/abc123/statuses/build";
-    assert_eq!(w[1].1, status);
-    assert_eq!(w[2], (Method::Post, status.into(), Some(json!({
-        "key": "pr-guard-reviewers", "state": "FAILED", "name": "pr-guard/reviewers", "description": "1 of 2 approvals", "url": "https://ci/run/1"
+    // One build status, failed until the approvals (Bitbucket's merge check counts only builds that passed).
+    assert_eq!(w[1], (Method::Post, status.into(), Some(json!({
+        "key": "pr-guard", "state": "FAILED", "name": "pr-guard", "description": "Needs 2 reviewers: 1 of 2 approvals", "url": "https://ci/run/1"
     }))));
-    assert_eq!(w.len(), 3);
+    assert_eq!(w.len(), 2);
 }
 
 #[test]
@@ -321,6 +322,6 @@ fn one_failing_part_does_not_stop_the_others() {
     assert_eq!(errors.len(), 1);
     assert!(errors[0].starts_with("labels: GitHub Get") && errors[0].contains("HTTP 403"), "{}", errors[0]);
     let w = m.writes();
-    assert_eq!(w.len(), 3);
-    assert_eq!(w[2].2.as_ref().unwrap()["description"], "1 of 1 approvals");
+    assert_eq!(w.len(), 2);
+    assert_eq!(w[1].2.as_ref().unwrap()["description"], "Passed, 1 of 1 approval");
 }

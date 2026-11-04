@@ -141,8 +141,7 @@ request. pr-guard reads the host from the `origin` remote and, when it has a tok
 |---|---|---|---|
 | Sticky comment (created once, then edited) | issue comment | merge request note | pull request comment |
 | Labels `pr-guard:reviewers-N`, `pr-guard:blocked`, `pr-guard:type-…`, `pr-guard:not-evaluated`, `pr-guard:auto-merge` | yes | yes | no labels on Bitbucket |
-| Status `pr-guard`: failure only when the policy blocks (never in shadow mode) | commit status | commit status | build status |
-| Required reviewers | status `pr-guard/reviewers`, pending until N approvals | the merge request's `pr-guard` approval rule (`approvals_required`, Premium) | build status `pr-guard/reviewers`, failed until N approvals |
+| Status `pr-guard`: failed when the policy blocks, waiting until the approvals the verdict asks for, else passed (always passed in shadow mode) | commit status, pending while approvals are missing | commit status; the approvals go to the merge request's `pr-guard` approval rule (`approvals_required`, Premium) | build status, failed while approvals are missing |
 
 | Host | Found by | Token |
 |---|---|---|
@@ -164,13 +163,13 @@ publish:
 ```
 
 The comment ends with the verdict as JSON inside an HTML comment (head commit, reviewers, shadow, blocked). `pr-guard
-reviewers` reads it back on a review event, counts the approvals and updates `pr-guard/reviewers` without the diff or
+reviewers` reads it back on a review event, counts the approvals and sets `pr-guard` again without the diff or
 the model; a verdict for an older commit leaves the status waiting for the next check. Only comments written by the
 token's own account are read or edited, so a pasted copy of the marker cannot lower the number of reviewers. When the
 token cannot say who it is (GitHub's `GITHUB_TOKEN` outside Actions, some Bitbucket tokens), set `PR_GUARD_BOT` to the
 account's login (GitHub, GitLab) or `account_id` (Bitbucket); on GitHub Actions it is `github-actions[bot]`.
 
-To make the reviewers binding, add `pr-guard` and `pr-guard/reviewers` to the required status checks (GitHub branch
+To make the verdict binding, add `pr-guard` to the required status checks (GitHub branch
 protection or ruleset) or enable the "passing builds" merge check (Bitbucket). On GitLab the approval rule is enforced
 by GitLab itself; on GitLab Free, where merge request approval rules do not exist, the call fails with a warning.
 
@@ -185,7 +184,7 @@ on: pull_request
 permissions:
   contents: read
   pull-requests: write   # comment and labels
-  statuses: write        # pr-guard and pr-guard/reviewers
+  statuses: write        # the pr-guard status
   security-events: write # SARIF
 jobs:
   pr-guard:

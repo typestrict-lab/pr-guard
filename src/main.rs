@@ -80,7 +80,7 @@ enum Cmd {
         #[arg(long)]
         no_publish: bool,
     },
-    /// Re-count a pull request's approvals against the verdict in pr-guard's comment and set `pr-guard/reviewers`, without
+    /// Re-count a pull request's approvals against the verdict in pr-guard's comment and set the `pr-guard` status again, without
     /// the diff or the model (for review events).
     Reviewers {
         /// The pull request number on the host; default the CI's.

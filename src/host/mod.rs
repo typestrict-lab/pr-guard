@@ -322,8 +322,8 @@ pub enum State {
     Waiting,
 }
 
+/// One status for the whole verdict: failed when the policy blocks, pending until the approvals it asks for, else passed.
 pub const STATUS: &str = "pr-guard";
-pub const REVIEWERS_STATUS: &str = "pr-guard/reviewers";
 
 pub(crate) trait Api {
     /// The token's own account, whose comments are the only ones trusted.
@@ -419,7 +419,7 @@ impl Api for Client<'_> {
 
 const STORED: &str = "<!-- pr-guard:verdict ";
 
-/// What `pr-guard reviewers` needs from the last check, and the commit it was for.
+/// What `pr-guard reviewers` needs from the last check to set the status again, and the commit it was for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stored {
     pub head: String,
@@ -427,14 +427,18 @@ pub struct Stored {
     pub shadow: bool,
     pub blocked: bool,
     pub skipped: bool,
+    /// Why the policy blocks, for the status a review event sets again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
 }
 
 impl Stored {
     pub fn of(v: &Verdict, head: &str) -> Stored {
-        Stored { head: head.into(), reviewers: v.reviewers, shadow: v.shadow, blocked: v.blocked, skipped: v.skipped }
+        let why = v.blocked.then(|| v.findings.first().map_or("policy".into(), |f| f.message.clone()));
+        Stored { head: head.into(), reviewers: v.reviewers, shadow: v.shadow, blocked: v.blocked, skipped: v.skipped, why }
     }
 
-    /// Approvals the host must see before `pr-guard/reviewers` passes: none in shadow mode or when skipped.
+    /// Approvals the host must see before `pr-guard` passes: none in shadow mode or when skipped.
     pub fn needed(&self) -> u8 {
         if self.shadow || self.skipped { 0 } else { self.reviewers }
     }
@@ -496,46 +500,40 @@ fn clip(s: &str, n: usize) -> String {
     if s.chars().count() <= n { s.to_string() } else { s.chars().take(n - 1).chain(['…']).collect() }
 }
 
-/// `pr-guard` on the head commit: failure only when the policy blocks (never in shadow mode, where `blocked` is false).
-fn verdict_status(v: &Verdict) -> (State, String) {
-    let who = match v.reviewers {
-        1 => "1 reviewer".to_string(),
-        n => format!("{n} reviewers"),
-    };
-    if v.skipped {
-        (State::Success, "Skipped by label".into())
-    } else if v.blocked {
-        let why = v.findings.first().map(|f| f.message.as_str()).unwrap_or("policy");
-        (State::Failure, format!("Blocked: {why}"))
-    } else if v.shadow {
-        (State::Success, format!("Shadow mode: would need {who}"))
-    } else {
-        (State::Success, format!("Needs {who}"))
+/// The status of the head commit from the verdict and, when `count`, the approvals the host has: failed when the policy
+/// blocks (never in shadow mode, where `blocked` is false), pending while approvals are missing, else passed. GitLab
+/// gets the number as the merge request's approval rule, which it enforces itself. A verdict for an older commit waits
+/// for the check of the new one, so an approval of code nobody re-checked does not pass it.
+fn status_of(api: &dyn Api, s: &Stored, head: &str, count: bool) -> anyhow::Result<(State, String)> {
+    let plural = |n: u32, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    let who = plural(u32::from(s.reviewers), "reviewer", "reviewers");
+    if s.skipped {
+        return Ok((State::Success, "Skipped by label".into()));
     }
-}
-
-/// Sets `pr-guard/reviewers` from the approvals the host counts, or hands the number to the host (GitLab).
-fn enforce_reviewers(api: &dyn Api, s: &Stored, head: &str) -> anyhow::Result<String> {
-    let need = s.needed();
-    // Bitbucket's API gives 12-character hashes, the pipeline full ones.
     if s.head.is_empty() || !(s.head.starts_with(head) || head.starts_with(&s.head)) {
-        let d = "Waiting for pr-guard to check the new commits";
-        api.status(head, REVIEWERS_STATUS, State::Waiting, d)?;
-        return Ok(d.into());
+        // Bitbucket's API gives 12-character hashes, the pipeline full ones.
+        return Ok((State::Waiting, "Waiting for pr-guard to check the new commits".into()));
     }
-    if api.require_approvals(need)? {
-        return Ok(format!("approval rule requires {need}"));
+    if s.blocked {
+        return Ok((State::Failure, format!("Blocked: {}", s.why.as_deref().unwrap_or("policy"))));
+    }
+    if !count {
+        return Ok((State::Success, if s.shadow { format!("Shadow mode: would need {who}") } else { format!("Needs {who}") }));
+    }
+    let need = s.needed();
+    let by_rule = api.require_approvals(need)?;
+    if s.shadow {
+        return Ok((State::Success, format!("Shadow mode: would need {who}")));
+    }
+    if need == 0 {
+        return Ok((State::Success, "Passed, no reviewer needed".into()));
+    }
+    if by_rule {
+        return Ok((State::Success, format!("Needs {who}, required by the merge request's approval rule")));
     }
     let have = api.approvals()?;
-    let (state, d) = if s.shadow {
-        (State::Success, format!("Shadow mode: would need {} {}, has {have}", s.reviewers, if s.reviewers == 1 { "approval" } else { "approvals" }))
-    } else if have >= u32::from(need) {
-        (State::Success, format!("{have} of {need} approvals"))
-    } else {
-        (State::Waiting, format!("{have} of {need} approvals"))
-    };
-    api.status(head, REVIEWERS_STATUS, state, &d)?;
-    Ok(d)
+    let of = format!("{have} of {need} {}", if need == 1 { "approval" } else { "approvals" });
+    Ok(if have >= u32::from(need) { (State::Success, format!("Passed, {of}")) } else { (State::Waiting, format!("Needs {who}: {of}")) })
 }
 
 /// Everything `check` publishes. Each part runs even when another fails (a token without label rights still comments),
@@ -578,14 +576,11 @@ pub(crate) fn publish_with(api: &dyn Api, env: &Env, t: &Target, policy: &Policy
             if add.is_empty() && remove.is_empty() { Ok(()) } else { api.set_labels(&add, &remove) }
         })());
     }
-    if !head.is_empty() {
-        if status {
-            let (state, d) = verdict_status(v);
-            note("status", api.status(&head, STATUS, state, &clip(&d, 140)));
-        }
-        if reviewers {
-            note("required reviewers", enforce_reviewers(api, &stored, &head).map(drop));
-        }
+    if !head.is_empty() && status {
+        note("status", status_of(api, &stored, &head, reviewers).and_then(|(state, d)| api.status(&head, STATUS, state, &clip(&d, 140))));
+    } else if reviewers {
+        // No status to wait on: only GitLab's approval rule can still hold the merge.
+        note("required reviewers", api.require_approvals(stored.needed()).map(drop));
     }
     errors
 }
@@ -606,7 +601,9 @@ pub(crate) fn reviewers_with(api: &dyn Api, env: &Env, t: &Target) -> anyhow::Re
     let me = whoami(api, env)?;
     let Some(s) = find_sticky(api, &me)?.and_then(|c| stored(&c.body)) else { return Ok(None) };
     let head = t.head.clone().map_or_else(|| api.head(), Ok)?;
-    enforce_reviewers(api, &s, &head).map(Some)
+    let (state, d) = status_of(api, &s, &head, true)?;
+    api.status(&head, STATUS, state, &clip(&d, 140))?;
+    Ok(Some(d))
 }
 
 pub fn reviewers(http: &dyn Http, env: &Env, t: &Target) -> anyhow::Result<Option<String>> {

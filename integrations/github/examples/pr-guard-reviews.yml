@@ -1,6 +1,6 @@
-# Re-counts the approvals when a review is submitted or dismissed and sets the `pr-guard/reviewers` status from the
-# verdict in pr-guard's comment: no checkout, no diff, no model, a few seconds. Make `pr-guard/reviewers` a required
-# status in the branch protection rule (or ruleset) next to `pr-guard`.
+# Re-counts the approvals when a review is submitted or dismissed and sets the `pr-guard` status again from the
+# verdict in pr-guard's comment: no checkout, no diff, no model, a few seconds. Make `pr-guard` a required status in
+# the branch protection rule (or ruleset).
 #
 # Copy to .github/workflows/pr-guard-reviews.yml. On pull requests from forks GitHub gives this workflow a read-only
 # token, so the status cannot be set there.

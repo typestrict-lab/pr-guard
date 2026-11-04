@@ -116,9 +116,9 @@ pub struct Publish {
     pub comment: bool,
     /// `pr-guard:reviewers-N`, `pr-guard:blocked` and the others in the verdict (no labels on Bitbucket).
     pub labels: bool,
-    /// The `pr-guard` commit status: failure only when the policy blocks.
+    /// The `pr-guard` commit status: failed when the policy blocks, waiting for the approvals (when `reviewers`).
     pub status: bool,
-    /// Required approvals: the `pr-guard/reviewers` status (GitHub, Bitbucket) or the approval rule (GitLab).
+    /// Required approvals: the `pr-guard` status waits for them (GitHub, Bitbucket), or the approval rule (GitLab).
     pub reviewers: bool,
 }
 
