@@ -204,7 +204,8 @@ fn run() -> anyhow::Result<()> {
             }
             // Failures are warnings: the exit code stays the verdict's.
             if let Some(t) = &target {
-                for e in host::publish(&http, &env, t, &policy, &v, &report::comment(&v)) {
+                let md = if t.kind == host::Kind::Bitbucket { report::comment_markdown_only(&v) } else { report::comment(&v) };
+                for e in host::publish(&http, &env, t, &policy, &v, &md) {
                     eprintln!("pr-guard: warning: could not publish to {}: {e}", t.kind.name());
                 }
             }

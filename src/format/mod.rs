@@ -159,7 +159,7 @@ pub(crate) mod tests {
         let t = text(&v, false);
         assert!(t.contains("type Documentation only (by rule), tests not applicable (no code changed, by rule)"), "{t}");
         let m = report::comment(&v);
-        assert!(m.contains("type: `Documentation only` (by rule)") && m.contains("Tests: not applicable"), "{m}");
+        assert!(m.contains("type `Documentation only` (by rule)") && m.contains("| ➖ | Do the tests cover it? | Not applicable"), "{m}");
         let j: serde_json::Value = serde_json::from_str(&render(Format::Json, &v, false)).unwrap();
         assert_eq!((j["change_type"].as_str(), j["change_type_source"].as_str(), j["tests_applicable"].as_bool()), (Some("Documentation only"), Some("rule"), Some(false)));
         // A verdict written before these fields still reads.
