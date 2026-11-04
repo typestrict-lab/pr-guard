@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::diff::FileChange;
 use crate::lang;
-use crate::policy::{Level, Mode, Policy, Question};
+use crate::policy::{Level, Mode, Policy, Question, Reviewers};
 
 /// TS-PRGuard's answers for one pull request. Probabilities are of the question as asked (for `vulnerability`, the chance
 /// that the change introduces one); `complexity` is the band, 0 (trivial) to 4 (very complex). Absent = not asked.
@@ -101,6 +101,12 @@ pub struct Verdict {
     pub tests_applicable: Option<bool>,
     #[serde(default)]
     pub tests_source: Option<Source>,
+    /// How the score was made, for the comment: the weight of each answer the policy weighed, and its reviewer
+    /// thresholds.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub weights: BTreeMap<Question, f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thresholds: Option<Reviewers>,
 }
 
 pub fn decide(policy: &Policy, files: &[FileChange], answers: &Answers, pr_labels: &[String], rule_findings: Vec<Finding>) -> Verdict {
@@ -109,7 +115,7 @@ pub fn decide(policy: &Policy, files: &[FileChange], answers: &Answers, pr_label
         return Verdict {
             skipped: true, shadow, score: None, scores: BTreeMap::new(), reviewers: 0, auto_merge: false, blocked: false,
             not_evaluated: vec![], findings: vec![], change_type: None, cwe: None, labels: vec![], change_type_source: None,
-            tests_applicable: None, tests_source: None,
+            tests_applicable: None, tests_source: None, weights: BTreeMap::new(), thresholds: None,
         };
     }
     let mut not_evaluated: Vec<String> = files
@@ -125,11 +131,12 @@ pub fn decide(policy: &Policy, files: &[FileChange], answers: &Answers, pr_label
 
     let scores = answers.scores();
     let mut findings = rule_findings;
-    let (mut sum, mut weights) = (0.0, 0.0);
+    let (mut sum, mut weights, mut weighed) = (0.0, 0.0, BTreeMap::new());
     for (q, gate) in &policy.questions {
         let Some(&s) = scores.get(q) else { continue };
         sum += gate.weight * s;
         weights += gate.weight;
+        weighed.insert(*q, gate.weight);
         let level = if gate.min.is_some_and(|m| s < m) {
             Some(Level::Danger)
         } else if gate.warn_below.is_some_and(|w| s < w) {
@@ -174,7 +181,8 @@ pub fn decide(policy: &Policy, files: &[FileChange], answers: &Answers, pr_label
     Verdict {
         skipped: false, shadow, score, scores, reviewers, auto_merge, blocked, not_evaluated, findings,
         change_type: answers.change_type.clone(), cwe: answers.cwe.clone(), labels, change_type_source: answers.change_type_source,
-        tests_applicable: answers.tests_applicable, tests_source: answers.tests_source,
+        tests_applicable: answers.tests_applicable, tests_source: answers.tests_source, weights: weighed,
+        thresholds: Some(policy.reviewers),
     }
 }
 

@@ -80,7 +80,10 @@ fn scorecard(v: &Verdict) -> Vec<(&'static str, String, String)> {
     }
     if let Some(safe) = score("complexity") {
         const BANDS: [&str; 5] = ["Trivial", "Small", "Medium", "Large", "Very large"];
-        rows.push((icon("complexity"), "How big is it to review?".into(), BANDS[((1.0 - safe) * 4.0).round().clamp(0.0, 4.0) as usize].into()));
+        // The size informs, it does not approve: neutral from Medium up unless the policy warns about it.
+        let band = ((1.0 - safe) * 4.0).round().clamp(0.0, 4.0) as usize;
+        let has_finding = v.findings.iter().any(|f| f.rule == "complexity");
+        rows.push((if has_finding || band < 2 { icon("complexity") } else { "⚪" }, "How big is it to review?".into(), BANDS[band].into()));
     }
     rows
 }
@@ -127,19 +130,60 @@ fn render(v: &Verdict, html: bool) -> String {
                 (Some(p), None) => format!("`{p}`"),
                 _ => String::new(),
             };
-            let _ = writeln!(s, "| {} | {} | {at} |", level_icon(f.level), f.message.replace('|', "\\|"));
+            // The Where column has the path: the message does not repeat it.
+            let message = f.path.as_ref().and_then(|p| f.message.strip_suffix(&format!(": {p}"))).unwrap_or(&f.message);
+            let _ = writeln!(s, "| {} | {} | {at} |", level_icon(f.level), message.replace('|', "\\|"));
         }
         s.push('\n');
     }
-    if html && v.score.is_some() {
-        s.push_str(
-            "<details><summary>How pr-guard decided</summary>\n\nTS-PRGuard answered each question on this runner; the \
-             percentage is how sure it is. The policy weighs the answers into the score: at or above its `none_at` no reviewer is needed, at or above `one_at` one, below it \
-             two. A danger finding blocks when the policy enforces. Thresholds live in `.github/pr-guard.yml` \
-             (`pr-guard init` prints the defaults).\n</details>\n\n",
-        );
+    if let (true, Some(score)) = (html, v.score) {
+        s.push_str("<details><summary>How pr-guard decided</summary>\n\n");
+        s.push_str(&audit(v, score));
+        s.push_str("</details>\n\n");
     }
     footer(s, html)
+}
+
+/// The score's arithmetic: each answer as a score on the safe side times its weight, the total, and where it falls
+/// between the policy's thresholds; then what raised the count above that.
+fn audit(v: &Verdict, score: f64) -> String {
+    let mut s = String::from("| Question | Score (1 = safe) | Weight | Points |\n|---|--:|--:|--:|\n");
+    let names: Vec<(&str, &str)> = QUESTIONS.iter().map(|(r, q, _)| (*r, *q)).chain([("complexity", "How big is it to review?")]).collect();
+    let (mut points, mut total) = (0.0, 0.0);
+    // In the order of the questions table above.
+    let rule_of = |q: &crate::policy::Question| serde_json::to_value(q).ok().and_then(|x| x.as_str().map(str::to_string)).unwrap_or_default();
+    let mut rows: Vec<_> = v.weights.iter().filter_map(|(q, w)| Some((rule_of(q), *w, *v.scores.get(q)?))).collect();
+    rows.sort_by_key(|(rule, _, _)| names.iter().position(|(r, _)| r == rule).unwrap_or(usize::MAX));
+    for (rule, w, sc) in rows {
+        let name = names.iter().find(|(r, _)| *r == rule).map_or(rule.as_str(), |(_, n)| n);
+        let _ = writeln!(s, "| {name} | {sc:.2} | {w} | {:.2} |", sc * w);
+        points += sc * w;
+        total += w;
+    }
+    let _ = writeln!(s, "| **Score** | | **{total}** | **{points:.2} / {total} = {:.0}%** |\n", score * 100.0);
+    if let Some(t) = v.thresholds {
+        let band = if score >= t.none_at { 0 } else if score >= t.one_at { 1 } else { 2 };
+        let _ = write!(
+            s,
+            "{:.0}% or more needs no reviewer, {:.0}% or more one, below that two: **{}** by the score.",
+            t.none_at * 100.0,
+            t.one_at * 100.0,
+            match band { 0 => "no reviewer", 1 => "1 reviewer", _ => "2 reviewers" }
+        );
+        if v.reviewers > band {
+            let why = if v.findings.iter().any(|f| f.level == Level::Danger) {
+                "a danger finding asks for two"
+            } else if !v.not_evaluated.is_empty() {
+                "code outside the model's languages asks for at least one"
+            } else {
+                "a warning asks for at least one"
+            };
+            let _ = write!(s, " Raised to **{}**: {why}.", if v.reviewers == 1 { "1 reviewer".into() } else { format!("{} reviewers", v.reviewers) });
+        }
+        s.push('\n');
+    }
+    s.push_str("\nThe thresholds and weights are the policy's (`.github/pr-guard.yml`; `pr-guard init` prints the defaults).\n");
+    s
 }
 
 /// The signature: where it ran and who made it. With HTML, the typestrict.ai wordmark in the reader's theme.
@@ -199,6 +243,15 @@ mod tests {
         let c = comment(&v);
         assert!(c.starts_with(MARKER) && c.contains("### 🟠 Needs 2 reviewers") && c.contains("| 🔴 | Looks like a GitHub token"));
         assert!(c.contains("| ✅ | Does it do what the description says? | Yes · 90% |") && c.contains("prefers-color-scheme: dark") && c.contains(LOGO_LIGHT));
+        let sensitive = Finding::at(Level::Warning, "sensitive_paths", "Changes a sensitive path: src/auth.ts".into(), "src/auth.ts", None);
+        let big = Answers { complexity: Some(3), ..a.clone() };
+        let c2 = comment(&decide(&Policy::default(), &files, &big, &[], vec![sensitive]));
+        assert!(c2.contains("| **Score** |") && c2.contains("one, below that two: **1 reviewer** by the score."), "{c2}");
+        // A danger raises the count past the score's band, and the accordion says why.
+        let leak2 = Finding::at(Level::Danger, "secrets", "Looks like a token".into(), "src/a.ts", Some(1));
+        let c3 = comment(&decide(&Policy::default(), &files, &a, &[], vec![leak2]));
+        assert!(c3.contains("Raised to **2 reviewers**: a danger finding asks for two."), "{c3}");
+        assert!(c2.contains("| 🟡 | Changes a sensitive path | `src/auth.ts` |") && c2.contains("| ⚪ | How big is it to review? | Large |"), "{c2}");
         let plain = comment_markdown_only(&v);
         assert!(!plain.contains('<') || plain.matches('<').count() == 1, "only the marker is HTML on Bitbucket: {plain}");
         assert!(plain.contains("Powered by [typestrict.ai](https://typestrict.ai)"));
