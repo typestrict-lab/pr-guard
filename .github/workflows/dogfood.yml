@@ -1,0 +1,48 @@
+# pr-guard on its own pull requests, built from the commit under review (the Action installs a release; this repo
+# tests the code before there is one). Shadow by default policy: it reports, comments, labels and sets statuses, and
+# never fails the pull request.
+name: Dogfood
+on:
+  pull_request:
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
+
+concurrency:
+  group: dogfood-${{ github.event.pull_request.number }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      - name: Cache the model
+        if: github.event_name == 'pull_request'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pr-guard
+          key: pr-guard-model-${{ hashFiles('src/pull.rs') }}
+      - name: Check
+        if: github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        # Time and peak memory of a real run on a stock runner, the targets of the plan (< 60 s, < 1.5 GB).
+        run: |
+          /usr/bin/time -v target/release/pr-guard check --format markdown --output pr-guard.md 2> >(tee stderr.txt >&2)
+          grep -E "Elapsed|Maximum resident" stderr.txt
+          cat pr-guard.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Reviewers
+        if: github.event_name == 'pull_request_review'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: target/release/pr-guard reviewers
