@@ -51,7 +51,7 @@ pub fn comment(v: &Verdict) -> String {
         for (q, score) in &v.scores {
             let _ = writeln!(s, "| `{}` | {:.0}% |", serde_json::to_value(q).unwrap().as_str().unwrap_or_default(), score * 100.0);
         }
-        s.push_str("\n1 is the safe side. Comment `/pr-guard explain` for how the policy weighed them.\n</details>\n");
+        s.push_str("\n1 is the safe side; the policy weighs them into the combined score.\n</details>\n");
     }
     s
 }

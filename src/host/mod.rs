@@ -528,7 +528,7 @@ fn enforce_reviewers(api: &dyn Api, s: &Stored, head: &str) -> anyhow::Result<St
     }
     let have = api.approvals()?;
     let (state, d) = if s.shadow {
-        (State::Success, format!("Shadow mode: would need {} approvals, has {have}", s.reviewers))
+        (State::Success, format!("Shadow mode: would need {} {}, has {have}", s.reviewers, if s.reviewers == 1 { "approval" } else { "approvals" }))
     } else if have >= u32::from(need) {
         (State::Success, format!("{have} of {need} approvals"))
     } else {
